@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: A bug in hivebox itself
+    url: https://github.com/tamnd/hivebox/issues/new/choose
+    about: This repository is the harness. A problem the harness found in hivebox belongs there, with a link to the report here.

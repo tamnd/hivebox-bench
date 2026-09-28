@@ -1,0 +1,19 @@
+name: Result question
+description: A number in a report looks wrong, or cannot be reproduced.
+title: "result: "
+labels: ["kind/methodology", "status/needs-triage"]
+body:
+  - type: input
+    id: report
+    attributes:
+      label: The report
+      description: The path under reports/ or a link to it.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What looks wrong
+      description: If you reran it, include your command, your numbers and your machine.
+    validations:
+      required: true

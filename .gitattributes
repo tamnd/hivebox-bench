@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# Committed traces and fixtures are compared byte for byte.
+fixtures/** -text

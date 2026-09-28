@@ -1,0 +1,23 @@
+name: Suite
+description: A benchmark that should exist and does not.
+title: "suite: "
+labels: ["kind/suite", "status/needs-triage"]
+body:
+  - type: textarea
+    id: measures
+    attributes:
+      label: What it measures
+    validations:
+      required: true
+  - type: textarea
+    id: target
+    attributes:
+      label: What it is judged against
+      description: A target from the hivebox spec, a published baseline, or an argument for a new one.
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: What it needs
+      description: Hardware, node count, datasets, and which hivebox milestone.

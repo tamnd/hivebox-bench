@@ -1,0 +1,35 @@
+# Not published. This is a harness that drives a cluster, and nobody should be depending on it from
+# a build.
+[package]
+name = "hivebox-bench"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88.0"
+license = "Apache-2.0"
+repository = "https://github.com/tamnd/hivebox-bench"
+homepage = "https://github.com/tamnd/hivebox-bench"
+authors = ["tamnd <tamnd87@gmail.com>"]
+description = "The benchmark harness for hivebox."
+publish = false
+
+[dependencies]
+
+[lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+rust_2018_idioms = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+missing_panics_doc = "warn"
+todo = "warn"
+dbg_macro = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# A load generator is profiled more often than it is shipped, and the question of whether the
+# harness itself is the bottleneck is one it has to be able to answer about itself.
+debug = 1

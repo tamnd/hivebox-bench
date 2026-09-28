@@ -1,0 +1,19 @@
+/target
+
+# Raw results from a run. What gets committed is the report under reports/, with the raw files it
+# was computed from attached to the run's release or linked from the report.
+/results
+/traces
+*.jsonl.zst
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Datasets and images pulled for the real data runs. Large and regenerable.
+/datasets
+/images
+
+.DS_Store
+.idea/
+.vscode/
+*.swp
