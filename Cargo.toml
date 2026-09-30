@@ -13,6 +13,9 @@ description = "The benchmark harness for hivebox."
 publish = false
 
 [dependencies]
+# The tag is the release a report was measured against, and it moves only with a new report.
+hive-sdk = { git = "https://github.com/tamnd/hivebox", tag = "v0.0.9" }
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [lints.rust]
 missing_debug_implementations = "warn"

@@ -43,3 +43,5 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The SDK comes from a hivebox release tag, never from a branch.
+allow-git = ["https://github.com/tamnd/hivebox"]
