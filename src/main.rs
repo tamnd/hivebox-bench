@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use hive_sdk::Client;
 use hivebox_bench::node::{self, Target};
+use hivebox_bench::raw::Raw;
 use hivebox_bench::suite::{self, SUITES};
 
 fn main() -> ExitCode {
@@ -64,6 +65,7 @@ fn main() -> ExitCode {
             println!("  --alive 0               create-storm: also hold this many cells at once");
             println!("  --cells 100             exec: how many cells the commands go round");
             println!("  --in-flight 1,8,32,128  exec: the concurrency levels to step through");
+            println!("  --raw FILE              also write every call to FILE as zstd JSON lines");
             ExitCode::SUCCESS
         }
     }
@@ -78,6 +80,7 @@ struct Opts {
     alive: u32,
     cells: u32,
     in_flight: Vec<usize>,
+    raw: Option<std::path::PathBuf>,
 }
 
 impl Opts {
@@ -90,6 +93,7 @@ impl Opts {
             alive: 0,
             cells: 100,
             in_flight: vec![1, 8, 32, 128],
+            raw: None,
         };
         let list = |v: &str| v.split(',').map(|n| n.trim().parse().expect("a number")).collect();
         for pair in args.chunks(2) {
@@ -104,6 +108,7 @@ impl Opts {
                 "--in-flight" => {
                     o.in_flight = list(v).into_iter().map(|n: u32| n as usize).collect()
                 }
+                "--raw" => o.raw = Some(v.into()),
                 other => panic!("unknown option {other}"),
             }
         }
@@ -120,9 +125,18 @@ async fn run(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
     println!("{}", machine());
     println!("endpoint {endpoint}, image {}, run {}", o.image, t.run);
     println!();
+    let mut raw = match &o.raw {
+        Some(path) => Some(Raw::create(path).map_err(|e| {
+            hive_sdk::Error::new(
+                hive_sdk::Reason::InvalidArgument,
+                format!("{}: {e}", path.display()),
+            )
+        })?),
+        None => None,
+    };
     let r = match suite {
-        "create-storm" => storm(&t, o).await,
-        _ => exec(&t, o).await,
+        "create-storm" => storm(&t, o, &mut raw).await,
+        _ => exec(&t, o, &mut raw).await,
     };
     // Whatever happened, leave nothing behind.
     let (left, took) = t.stop_all().await?;
@@ -132,13 +146,25 @@ async fn run(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
     r
 }
 
-async fn storm(t: &Target, o: &Opts) -> Result<(), hive_sdk::Error> {
+/// Writes `samples` to the raw results file when there is one. A write that fails is said once
+/// and the file is dropped, since the tables are still good without it.
+fn keep(raw: &mut Option<Raw>, suite: &str, step: &str, samples: &[node::Sample]) {
+    if let Some(r) = raw
+        && let Err(e) = r.write(suite, step, samples)
+    {
+        eprintln!("raw results: {e}, not writing any more of them");
+        *raw = None;
+    }
+}
+
+async fn storm(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sdk::Error> {
     let mut steps = Vec::new();
     for &rate in &o.rates {
         let step = node::storm_step(t, rate, o.seconds).await?;
         if let Some(e) = &step.first_error {
             eprintln!("rate {rate}: {} failed ({} infra), first: {e}", step.failed, step.infra);
         }
+        keep(raw, "create-storm", &rate.to_string(), &step.samples);
         let broke = step.broke(o.p99);
         steps.push(step);
         eprint!("{}", node::storm_table(&steps[steps.len() - 1..]));
@@ -163,6 +189,7 @@ async fn storm(t: &Target, o: &Opts) -> Result<(), hive_sdk::Error> {
             println!("first failure: {e}");
         }
         let step = node::exec_step(&cells, &["true"], 64, o.seconds).await;
+        keep(raw, "create-storm", "alive-exec-64", &step.samples);
         println!();
         println!("`true` in all of them, 64 in flight, {} s", o.seconds);
         println!();
@@ -174,7 +201,7 @@ async fn storm(t: &Target, o: &Opts) -> Result<(), hive_sdk::Error> {
     Ok(())
 }
 
-async fn exec(t: &Target, o: &Opts) -> Result<(), hive_sdk::Error> {
+async fn exec(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sdk::Error> {
     let (cells, took, errors) = node::fill(t, "exec", o.cells, 50).await?;
     if let Some(e) = errors.first() {
         return Err(e.clone());
@@ -189,6 +216,7 @@ async fn exec(t: &Target, o: &Opts) -> Result<(), hive_sdk::Error> {
             eprintln!("{c} in flight: {} failed, first: {e}", step.failed);
         }
         eprint!("{}", node::exec_table(std::slice::from_ref(&step)));
+        keep(raw, "exec", &c.to_string(), &step.samples);
         steps.push(step);
     }
     println!();

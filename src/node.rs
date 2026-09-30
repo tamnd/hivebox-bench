@@ -48,6 +48,18 @@ impl Target {
     }
 }
 
+/// One call a step made: when it started, from the start of the step, how long it took, and why
+/// it failed if it did. These are what the raw results file holds.
+#[derive(Clone, Debug)]
+pub struct Sample {
+    /// When the call started, from the start of its step.
+    pub at: Duration,
+    /// How long it took to answer.
+    pub took: Duration,
+    /// The failure, if it failed.
+    pub error: Option<String>,
+}
+
 /// One step of a create storm: creates started at a fixed rate for a fixed time.
 #[derive(Clone, Debug)]
 pub struct StormStep {
@@ -67,6 +79,8 @@ pub struct StormStep {
     pub latency: Option<Summary>,
     /// How long stopping the step's cells took, and how many there were.
     pub stopped: (u32, Duration),
+    /// Every create, in the order they were started.
+    pub samples: Vec<Sample>,
 }
 
 impl StormStep {
@@ -104,22 +118,30 @@ pub async fn storm_step(t: &Target, rate: u32, seconds: u32) -> Result<StormStep
     for i in 0..total {
         tokio::time::sleep_until(start + gap * i as u32).await;
         let (client, spec) = (t.client.clone(), spec.clone());
+        let at = start.elapsed();
         tasks.push(tokio::spawn(async move {
             let t = Instant::now();
             let r = client.create(&spec).await;
-            (t.elapsed(), r.map(|_| ()))
+            (at, t.elapsed(), r.map(|_| ()))
         }));
     }
     let (mut ok, mut failed, mut infra, mut first_error) = (Vec::new(), 0, 0, None);
+    let mut samples = Vec::with_capacity(total);
     for task in tasks {
-        match task.await.expect("a create task panicked") {
-            (d, Ok(())) => ok.push(d),
-            (_, Err(e)) => {
+        let (at, took, r) = task.await.expect("a create task panicked");
+        let error = match r {
+            Ok(()) => {
+                ok.push(took);
+                None
+            }
+            Err(e) => {
                 failed += 1;
                 infra += usize::from(e.reason.is_infra());
                 first_error.get_or_insert_with(|| e.to_string());
+                Some(e.to_string())
             }
-        }
+        };
+        samples.push(Sample { at, took, error });
     }
     let wall = start.elapsed();
     let stopped = t.stop_all().await?;
@@ -132,6 +154,7 @@ pub async fn storm_step(t: &Target, rate: u32, seconds: u32) -> Result<StormStep
         wall,
         latency: Summary::of(&ok),
         stopped,
+        samples,
     })
 }
 
@@ -195,6 +218,8 @@ pub struct ExecStep {
     pub wall: Duration,
     /// The round trip of every command that succeeded.
     pub latency: Option<Summary>,
+    /// Every command, worker by worker.
+    pub samples: Vec<Sample>,
 }
 
 impl ExecStep {
@@ -225,32 +250,38 @@ pub async fn exec_step(
     for w in 0..concurrency {
         let cells = cells.clone();
         workers.push(tokio::spawn(async move {
-            let (mut ok, mut failed, mut first) = (Vec::new(), 0usize, None);
+            let (mut ok, mut failed, mut first, mut samples) =
+                (Vec::new(), 0usize, None, Vec::new());
             let mut i = w;
             while Instant::now() < end {
                 let cell = &cells[i % cells.len()];
                 i += concurrency;
                 let t = Instant::now();
-                match cell.run(argv.iter().map(|s| (*s).to_string()).collect::<Vec<_>>()).await {
-                    Ok(r) if r.exit_code == 0 => ok.push(t.elapsed()),
-                    Ok(r) => {
-                        failed += 1;
-                        first.get_or_insert_with(|| format!("exit {}", r.exit_code));
+                let r = cell.run(argv.iter().map(|s| (*s).to_string()).collect::<Vec<_>>()).await;
+                let took = t.elapsed();
+                let error = match r {
+                    Ok(r) if r.exit_code == 0 => {
+                        ok.push(took);
+                        None
                     }
-                    Err(e) => {
-                        failed += 1;
-                        first.get_or_insert_with(|| e.to_string());
-                    }
+                    Ok(r) => Some(format!("exit {}", r.exit_code)),
+                    Err(e) => Some(e.to_string()),
+                };
+                if let Some(e) = &error {
+                    failed += 1;
+                    first.get_or_insert_with(|| e.clone());
                 }
+                samples.push(Sample { at: t - start, took, error });
             }
-            (ok, failed, first)
+            (ok, failed, first, samples)
         }));
     }
-    let (mut ok, mut failed, mut first_error) = (Vec::new(), 0, None);
+    let (mut ok, mut failed, mut first_error, mut samples) = (Vec::new(), 0, None, Vec::new());
     for w in workers {
-        let (o, f, e) = w.await.expect("an exec worker panicked");
+        let (o, f, e, s) = w.await.expect("an exec worker panicked");
         ok.extend(o);
         failed += f;
+        samples.extend(s);
         if first_error.is_none() {
             first_error = e;
         }
@@ -264,6 +295,7 @@ pub async fn exec_step(
         first_error,
         wall,
         latency: Summary::of(&ok),
+        samples,
     }
 }
 
@@ -338,6 +370,7 @@ mod tests {
             wall: Duration::from_secs(10),
             latency: Summary::of(&[d]),
             stopped: (100, Duration::from_millis(5)),
+            samples: Vec::new(),
         }
     }
 
