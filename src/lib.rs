@@ -8,5 +8,6 @@
 #![forbid(unsafe_code)]
 
 pub mod node;
+pub mod raw;
 pub mod stats;
 pub mod suite;
