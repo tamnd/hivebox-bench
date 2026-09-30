@@ -17,3 +17,7 @@ flamegraph.svg
 .idea/
 .vscode/
 *.swp
+
+# The SWE runner's environment.
+__pycache__/
+venv/
