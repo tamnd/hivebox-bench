@@ -291,8 +291,8 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hive-proto"
-version = "0.0.17"
-source = "git+https://github.com/tamnd/hivebox?tag=v0.0.17#a39692eba910b1a16316e1aa9be4d094eccc1334"
+version = "0.0.20"
+source = "git+https://github.com/tamnd/hivebox?tag=v0.0.20#dd3c5ffabf6635867893de7ae5f4fb58cfcee3e6"
 dependencies = [
  "blake3",
  "bytes",
@@ -311,8 +311,8 @@ dependencies = [
 
 [[package]]
 name = "hive-sdk"
-version = "0.0.17"
-source = "git+https://github.com/tamnd/hivebox?tag=v0.0.17#a39692eba910b1a16316e1aa9be4d094eccc1334"
+version = "0.0.20"
+source = "git+https://github.com/tamnd/hivebox?tag=v0.0.20#dd3c5ffabf6635867893de7ae5f4fb58cfcee3e6"
 dependencies = [
  "bytes",
  "futures",
@@ -326,8 +326,8 @@ dependencies = [
 
 [[package]]
 name = "hive-types"
-version = "0.0.17"
-source = "git+https://github.com/tamnd/hivebox?tag=v0.0.17#a39692eba910b1a16316e1aa9be4d094eccc1334"
+version = "0.0.20"
+source = "git+https://github.com/tamnd/hivebox?tag=v0.0.20#dd3c5ffabf6635867893de7ae5f4fb58cfcee3e6"
 
 [[package]]
 name = "hivebox-bench"
