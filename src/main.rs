@@ -9,6 +9,7 @@ use hive_sdk::Client;
 use hivebox_bench::cluster::{self, Cluster, LossOpts, Rng, Shape};
 use hivebox_bench::image::{self, Nectar};
 use hivebox_bench::node::{self, Target};
+use hivebox_bench::qos::{self, QosOpts};
 use hivebox_bench::raw::Raw;
 use hivebox_bench::suite::{self, SUITES};
 
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
                         | "node-loss"
                         | "cold-image"
                         | "image-import"
+                        | "cpu-qos"
                 ) =>
             {
                 let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build();
@@ -122,6 +124,15 @@ fn main() -> ExitCode {
             println!(
                 "  --layouts FILE          image-import: the OCI layouts to import, one per line"
             );
+            println!("  --hogs 4                cpu-qos: hog cells next to the probe");
+            println!(
+                "  --loops 2               cpu-qos: spinning processes, and cores, per hog cell"
+            );
+            println!("  --steps 200             cpu-qos: probe steps per mode per round");
+            println!("  --turns 200000          cpu-qos: Python loop turns in one probe step");
+            println!("  --pause-ms 20           cpu-qos: the probe's sleep after each step");
+            println!("  --hog-s 30              cpu-qos: how long the hogs spin each time");
+            println!("  --rounds 5              cpu-qos: rounds of alone, no QoS and QoS");
             ExitCode::SUCCESS
         }
     }
@@ -151,6 +162,7 @@ struct Opts {
     repeat: usize,
     scratch: Option<std::path::PathBuf>,
     layouts: Option<std::path::PathBuf>,
+    qos: QosOpts,
 }
 
 impl Opts {
@@ -194,6 +206,15 @@ impl Opts {
             repeat: 10,
             scratch: None,
             layouts: None,
+            qos: QosOpts {
+                hogs: 4,
+                loops: 2,
+                steps: 200,
+                work: 200_000,
+                pause: Duration::from_millis(20),
+                hog_for: Duration::from_secs(30),
+                rounds: 5,
+            },
         };
         let list = |v: &str| v.split(',').map(|n| n.trim().parse().expect("a number")).collect();
         let secs = |v: &str| Duration::from_secs_f64(v.parse().expect("a number of seconds"));
@@ -234,6 +255,13 @@ impl Opts {
                 "--repeat" => o.repeat = v.parse().expect("--repeat takes a number"),
                 "--scratch" => o.scratch = Some(v.into()),
                 "--layouts" => o.layouts = Some(v.into()),
+                "--hogs" => o.qos.hogs = v.parse().expect("--hogs takes a number"),
+                "--loops" => o.qos.loops = v.parse().expect("--loops takes a number"),
+                "--steps" => o.qos.steps = v.parse().expect("--steps takes a number"),
+                "--turns" => o.qos.work = v.parse().expect("--turns takes a number"),
+                "--pause-ms" => o.qos.pause = Duration::from_millis(v.parse().expect("a number")),
+                "--hog-s" => o.qos.hog_for = secs(v),
+                "--rounds" => o.qos.rounds = v.parse().expect("--rounds takes a number"),
                 other => panic!("unknown option {other}"),
             }
         }
@@ -275,6 +303,7 @@ async fn run(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
         "create-storm" => storm(&t, o, &mut raw).await,
         "replay" => replay(&c, o, &mut raw).await,
         "node-loss" => loss(&c, o, &mut raw).await,
+        "cpu-qos" => cpu_qos(&t, o, &mut raw).await,
         _ => exec(&t, o, &mut raw).await,
     };
     // Whatever happened, leave nothing behind.
@@ -283,6 +312,29 @@ async fn run(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
         eprintln!("stopped {left} cells left from the run in {} ms", node::ms(took));
     }
     r
+}
+
+async fn cpu_qos(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sdk::Error> {
+    let q = &o.qos;
+    println!(
+        "{} hog cells of {} spinning processes each, probe steps of {} Python loop turns with {} ms between, {} steps per mode, {} rounds",
+        q.hogs,
+        q.loops,
+        q.work,
+        q.pause.as_millis(),
+        q.steps,
+        q.rounds
+    );
+    let modes = qos::run(t, q).await?;
+    for m in &modes {
+        keep(raw, "cpu-qos", m.name, &m.samples());
+        if m.overran > 0 {
+            eprintln!("{}: the probe ran past the hogs in {} rounds", m.name, m.overran);
+        }
+    }
+    println!();
+    print!("{}", qos::table(&modes));
+    Ok(())
 }
 
 async fn replay(c: &Cluster, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sdk::Error> {

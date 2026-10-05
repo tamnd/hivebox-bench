@@ -10,7 +10,7 @@ The design is [`spec/13_observability_testing_bench.md`](https://github.com/tamn
 
 ## Status
 
-The suites for hivebox M1 run against a real cluster: image-import, cold-image, replay and node-loss. The first numbers, from one shared 8 core VM and not yet the 16 node cluster, are in `reports/2026-10-04`. `hivebox-bench list` prints every suite with the target it is judged against.
+The suites for hivebox M1 run against a real cluster: image-import, cold-image, replay and node-loss. The first numbers, from one shared 8 core VM and not yet the 16 node cluster, are in `reports/2026-10-04`. The cpu-qos suite for M2 runs against one comb, and its first numbers are in `reports/2026-10-05`. `hivebox-bench list` prints every suite with the target it is judged against.
 
 ```
 cargo run -- list

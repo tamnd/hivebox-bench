@@ -26,7 +26,9 @@ pub struct Target {
 }
 
 impl Target {
-    fn spec(&self, step: &str) -> CellSpec {
+    /// A container spec from the run's image, labelled with the run and `step`.
+    #[must_use]
+    pub fn spec(&self, step: &str) -> CellSpec {
         let mut spec = CellSpec::new(Source::Image(self.image.clone()), Backend::Container);
         spec.labels = BTreeMap::from([
             ("bench".to_string(), self.run.clone()),

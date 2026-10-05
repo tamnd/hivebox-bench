@@ -14,9 +14,9 @@ publish = false
 
 [dependencies]
 # The tag is the release a report was measured against, and it moves only with a new report.
-hive-sdk = { git = "https://github.com/tamnd/hivebox", tag = "v0.0.17" }
+hive-sdk = { git = "https://github.com/tamnd/hivebox", tag = "v0.0.20" }
 # For the keeper's Status call, which replay reads its write rate from.
-hive-proto = { git = "https://github.com/tamnd/hivebox", tag = "v0.0.17" }
+hive-proto = { git = "https://github.com/tamnd/hivebox", tag = "v0.0.20" }
 tonic = { version = "0.14", default-features = false, features = ["channel"] }
 zstd = "0.13"
 tokio = { version = "1.53", features = ["macros", "process", "rt-multi-thread", "sync", "time"] }
