@@ -6,6 +6,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use hive_sdk::Client;
+use hivebox_bench::cluster::{self, Cluster, LossOpts, Rng, Shape};
+use hivebox_bench::image::{self, Nectar};
 use hivebox_bench::node::{self, Target};
 use hivebox_bench::raw::Raw;
 use hivebox_bench::suite::{self, SUITES};
@@ -22,7 +24,17 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("run") => match args.get(1).and_then(|n| suite::find(n)) {
-            Some(s) if matches!(s.name, "create-storm" | "exec") => {
+            Some(s)
+                if matches!(
+                    s.name,
+                    "create-storm"
+                        | "exec"
+                        | "replay"
+                        | "node-loss"
+                        | "cold-image"
+                        | "image-import"
+                ) =>
+            {
                 let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build();
                 let rt = rt.expect("a tokio runtime");
                 match rt.block_on(run(s.name, &Opts::parse(&args[2..]))) {
@@ -55,17 +67,61 @@ fn main() -> ExitCode {
             println!(
                 "  list         every suite, where it runs, and the target it is judged against"
             );
-            println!("  run <suite>  run one suite against the comb in HIVEBOX_ENDPOINT");
+            println!("  run <suite>  run one suite against the comb or gate in HIVEBOX_ENDPOINT");
+            println!();
+            println!(
+                "HIVEBOX_TOKEN is sent as the bearer token when it is set, which a gate needs."
+            );
             println!();
             println!("options for run, with their defaults:");
             println!("  --image python          the image every cell starts from");
             println!("  --seconds 10            how long each step lasts");
-            println!("  --rates 25,50,100,200,300,400  create-storm: the rates to step through");
+            println!("  --raw FILE              also write every call to FILE as zstd JSON lines");
+            println!(
+                "  --rates 25,50,100,200,300,400  create-storm and replay: the rates to step through"
+            );
             println!("  --p99-ms 400            create-storm: the p99 past which a step breaks");
             println!("  --alive 0               create-storm: also hold this many cells at once");
             println!("  --cells 100             exec: how many cells the commands go round");
             println!("  --in-flight 1,8,32,128  exec: the concurrency levels to step through");
-            println!("  --raw FILE              also write every call to FILE as zstd JSON lines");
+            println!(
+                "  --keeper http://127.0.0.1:7480  replay: the keeper whose writes are counted"
+            );
+            println!("  --idle-s 30             replay: how long the idle write rate is measured");
+            println!("  --burst 4               replay: the mean creates in a burst");
+            println!("  --life-s 20             replay: the median lifetime of a cell");
+            println!("  --sigma 1.0             replay: the sigma of the lifetime's logarithm");
+            println!("  --max-life-s 120        replay: the longest a cell is kept");
+            println!(
+                "  --images IMAGE,...      replay: the images, most popular first, default --image"
+            );
+            println!("  --zipf 1.1              replay: the Zipf exponent over the images");
+            println!(
+                "  --seed 1                replay: the seed for arrivals, lifetimes and images"
+            );
+            println!("  --hold 30               node-loss: cells made and held before the burst");
+            println!("  --rate 10               node-loss: the burst's creates a second");
+            println!("  --kill-after-s 5        node-loss: when in the burst the comb is killed");
+            println!("  --kill CMD              node-loss: the shell command that kills one comb");
+            println!("  --node N                node-loss: the node that command kills");
+            println!(
+                "  --settle-s 20           node-loss: the wait after the burst before checking cells"
+            );
+            println!("  --nectar hive-nectar    cold-image, image-import: the hive-nectar binary");
+            println!("  --store DIR             cold-image, image-import: the store directory");
+            println!("  --s3 URL                cold-image: a bucket in place of --store");
+            println!(
+                "  --work DIR              cold-image, image-import: where imports keep built layers"
+            );
+            println!("  --layout DIR            cold-image: the OCI layout of the image to start");
+            println!(
+                "  --cmd CMD               cold-image: what to run in it, default `python3 -c 1`"
+            );
+            println!("  --repeat 10             cold-image: starts per mode");
+            println!("  --scratch DIR           cold-image: where each start gets an empty cache");
+            println!(
+                "  --layouts FILE          image-import: the OCI layouts to import, one per line"
+            );
             ExitCode::SUCCESS
         }
     }
@@ -75,12 +131,26 @@ fn main() -> ExitCode {
 struct Opts {
     image: String,
     seconds: u32,
-    rates: Vec<u32>,
+    rates: Option<Vec<u32>>,
     p99: Duration,
     alive: u32,
     cells: u32,
     in_flight: Vec<usize>,
     raw: Option<std::path::PathBuf>,
+    keeper: String,
+    idle: u32,
+    shape: Shape,
+    seed: u64,
+    loss: LossOpts,
+    nectar: std::path::PathBuf,
+    store: Option<String>,
+    s3: Option<String>,
+    work: Option<std::path::PathBuf>,
+    layout: Option<std::path::PathBuf>,
+    cmd: String,
+    repeat: usize,
+    scratch: Option<std::path::PathBuf>,
+    layouts: Option<std::path::PathBuf>,
 }
 
 impl Opts {
@@ -88,20 +158,51 @@ impl Opts {
         let mut o = Self {
             image: "python".into(),
             seconds: 10,
-            rates: vec![25, 50, 100, 200, 300, 400],
+            rates: None,
             p99: Duration::from_millis(400),
             alive: 0,
             cells: 100,
             in_flight: vec![1, 8, 32, 128],
             raw: None,
+            keeper: "http://127.0.0.1:7480".into(),
+            idle: 30,
+            shape: Shape {
+                burst: 4.0,
+                life: Duration::from_secs(20),
+                sigma: 1.0,
+                max_life: Duration::from_secs(120),
+                images: Vec::new(),
+                zipf: 1.1,
+            },
+            seed: 1,
+            loss: LossOpts {
+                image: String::new(),
+                hold: 30,
+                rate: 10,
+                seconds: 10,
+                kill_after: Duration::from_secs(5),
+                kill: String::new(),
+                node: 0,
+                settle: Duration::from_secs(20),
+            },
+            nectar: "hive-nectar".into(),
+            store: None,
+            s3: None,
+            work: None,
+            layout: None,
+            cmd: "python3 -c 1".into(),
+            repeat: 10,
+            scratch: None,
+            layouts: None,
         };
         let list = |v: &str| v.split(',').map(|n| n.trim().parse().expect("a number")).collect();
+        let secs = |v: &str| Duration::from_secs_f64(v.parse().expect("a number of seconds"));
         for pair in args.chunks(2) {
             let v = pair.get(1).map_or("", String::as_str);
             match pair[0].as_str() {
                 "--image" => o.image = v.into(),
                 "--seconds" => o.seconds = v.parse().expect("--seconds takes a number"),
-                "--rates" => o.rates = list(v),
+                "--rates" => o.rates = Some(list(v)),
                 "--p99-ms" => o.p99 = Duration::from_millis(v.parse().expect("a number")),
                 "--alive" => o.alive = v.parse().expect("--alive takes a number"),
                 "--cells" => o.cells = v.parse().expect("--cells takes a number"),
@@ -109,33 +210,71 @@ impl Opts {
                     o.in_flight = list(v).into_iter().map(|n: u32| n as usize).collect()
                 }
                 "--raw" => o.raw = Some(v.into()),
+                "--keeper" => o.keeper = v.into(),
+                "--idle-s" => o.idle = v.parse().expect("--idle-s takes a number"),
+                "--burst" => o.shape.burst = v.parse().expect("--burst takes a number"),
+                "--life-s" => o.shape.life = secs(v),
+                "--sigma" => o.shape.sigma = v.parse().expect("--sigma takes a number"),
+                "--max-life-s" => o.shape.max_life = secs(v),
+                "--images" => o.shape.images = v.split(',').map(str::to_string).collect(),
+                "--zipf" => o.shape.zipf = v.parse().expect("--zipf takes a number"),
+                "--seed" => o.seed = v.parse().expect("--seed takes a number"),
+                "--hold" => o.loss.hold = v.parse().expect("--hold takes a number"),
+                "--rate" => o.loss.rate = v.parse().expect("--rate takes a number"),
+                "--kill-after-s" => o.loss.kill_after = secs(v),
+                "--kill" => o.loss.kill = v.into(),
+                "--node" => o.loss.node = v.parse().expect("--node takes a number"),
+                "--settle-s" => o.loss.settle = secs(v),
+                "--nectar" => o.nectar = v.into(),
+                "--store" => o.store = Some(v.into()),
+                "--s3" => o.s3 = Some(v.into()),
+                "--work" => o.work = Some(v.into()),
+                "--layout" => o.layout = Some(v.into()),
+                "--cmd" => o.cmd = v.into(),
+                "--repeat" => o.repeat = v.parse().expect("--repeat takes a number"),
+                "--scratch" => o.scratch = Some(v.into()),
+                "--layouts" => o.layouts = Some(v.into()),
                 other => panic!("unknown option {other}"),
             }
         }
+        if o.shape.images.is_empty() {
+            o.shape.images = vec![o.image.clone()];
+        }
+        o.loss.image = o.image.clone();
+        o.loss.seconds = o.seconds;
         o
     }
 }
 
+fn bad(what: impl Into<String>) -> hive_sdk::Error {
+    hive_sdk::Error::new(hive_sdk::Reason::InvalidArgument, what)
+}
+
 async fn run(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
+    if matches!(suite, "cold-image" | "image-import") {
+        println!("{}", machine());
+        return images(suite, o);
+    }
     let endpoint = std::env::var("HIVEBOX_ENDPOINT")
         .unwrap_or_else(|_| "unix:/run/hivebox/comb.sock".to_string());
     let run = format!("{}-{}", suite, std::process::id());
-    let client = Client::connect(&endpoint).await?.project("bench")?;
+    let mut client = Client::connect(&endpoint).await?.project("bench")?;
+    if let Ok(token) = std::env::var("HIVEBOX_TOKEN") {
+        client = client.token(&token)?;
+    }
     let t = Target { client, image: o.image.clone(), run };
     println!("{}", machine());
     println!("endpoint {endpoint}, image {}, run {}", o.image, t.run);
     println!();
     let mut raw = match &o.raw {
-        Some(path) => Some(Raw::create(path).map_err(|e| {
-            hive_sdk::Error::new(
-                hive_sdk::Reason::InvalidArgument,
-                format!("{}: {e}", path.display()),
-            )
-        })?),
+        Some(path) => Some(Raw::create(path).map_err(|e| bad(format!("{}: {e}", path.display())))?),
         None => None,
     };
+    let c = Cluster { client: t.client.clone(), keeper: o.keeper.clone(), run: t.run.clone() };
     let r = match suite {
         "create-storm" => storm(&t, o, &mut raw).await,
+        "replay" => replay(&c, o, &mut raw).await,
+        "node-loss" => loss(&c, o, &mut raw).await,
         _ => exec(&t, o, &mut raw).await,
     };
     // Whatever happened, leave nothing behind.
@@ -144,6 +283,99 @@ async fn run(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
         eprintln!("stopped {left} cells left from the run in {} ms", node::ms(took));
     }
     r
+}
+
+async fn replay(c: &Cluster, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sdk::Error> {
+    let s = &o.shape;
+    println!(
+        "bursts of {} on average, lifetimes lognormal with median {} s and sigma {} capped at {} s, {} images with Zipf {}, seed {}",
+        s.burst,
+        s.life.as_secs_f64(),
+        s.sigma,
+        s.max_life.as_secs_f64(),
+        s.images.len(),
+        s.zipf,
+        o.seed
+    );
+    let idle = cluster::idle_writes(&c.keeper, o.idle).await?;
+    eprintln!("idle: {idle:.2} keeper writes/s");
+    let mut rng = Rng::new(o.seed);
+    let mut steps = Vec::new();
+    for &rate in o.rates.as_deref().unwrap_or(&[5, 10, 20, 40]) {
+        let step = cluster::replay_step(c, s, &mut rng, rate, o.seconds).await?;
+        if let Some(e) = &step.first_error {
+            eprintln!("rate {rate}: {} failed ({} infra), first: {e}", step.failed, step.infra);
+        }
+        keep(raw, "replay", &rate.to_string(), &step.samples);
+        eprint!("{}", cluster::replay_table(idle, std::slice::from_ref(&step)));
+        steps.push(step);
+    }
+    println!();
+    println!(
+        "replay, {} s of arrivals a step, each step until its last cell is stopped",
+        o.seconds
+    );
+    println!();
+    print!("{}", cluster::replay_table(idle, &steps));
+    Ok(())
+}
+
+async fn loss(c: &Cluster, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sdk::Error> {
+    if o.loss.kill.is_empty() {
+        return Err(bad("node-loss needs --kill CMD and --node N"));
+    }
+    let l = cluster::node_loss(c, &o.loss).await?;
+    keep(raw, "node-loss", "burst", &l.samples);
+    println!(
+        "{} cells held, then {} creates a second for {} s, keyed and retried up to 4 times",
+        o.loss.hold, o.loss.rate, o.loss.seconds
+    );
+    println!();
+    print!("{}", cluster::loss_report(&l));
+    Ok(())
+}
+
+fn images(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
+    let store = match (&o.store, &o.s3) {
+        (Some(d), _) => vec!["--store".to_string(), d.clone()],
+        (None, Some(u)) => vec!["--s3".to_string(), u.clone()],
+        (None, None) => return Err(bad(format!("{suite} needs --store DIR or --s3 URL"))),
+    };
+    let work = o.work.clone().ok_or_else(|| bad(format!("{suite} needs --work DIR")))?;
+    let n = Nectar { bin: o.nectar.clone(), store, work: work.clone() };
+    if suite == "image-import" {
+        let dir = o.store.as_deref().ok_or_else(|| bad("image-import measures a --store DIR"))?;
+        let file = o.layouts.as_ref().ok_or_else(|| bad("image-import needs --layouts FILE"))?;
+        let list =
+            std::fs::read_to_string(file).map_err(|e| bad(format!("{}: {e}", file.display())))?;
+        let layouts: Vec<std::path::PathBuf> =
+            list.lines().map(str::trim).filter(|l| !l.is_empty()).map(Into::into).collect();
+        let rows = image::import_all(&n, std::path::Path::new(dir), &layouts);
+        println!();
+        print!("{}", image::import_table(&rows, image::tree_size(&work).0));
+        return Ok(());
+    }
+    let layout = o.layout.as_ref().ok_or_else(|| bad("cold-image needs --layout DIR"))?;
+    let scratch = o.scratch.as_ref().ok_or_else(|| bad("cold-image needs --scratch DIR"))?;
+    let (id, said, took) = n.import(layout).map_err(bad)?;
+    println!("imported {} as {id} in {:.1} s: {said}", layout.display(), took.as_secs_f64());
+    let traced = image::cold_runs_trace(&n, &id, &o.cmd, scratch).map_err(bad)?;
+    println!("traced `{}` into {traced}", o.cmd);
+    let modes = [
+        image::cold_runs(&n, "whole", &id, "whole", &o.cmd, o.repeat, scratch),
+        image::cold_runs(&n, "lazy", &id, "lazy", &o.cmd, o.repeat, scratch),
+        image::cold_runs(&n, "lazy-traced", &traced, "lazy", &o.cmd, o.repeat, scratch),
+    ];
+    for m in &modes {
+        if let (k, Some(e)) = &m.failed {
+            eprintln!("{}: {k} failed, first: {e}", m.name);
+        }
+    }
+    println!();
+    println!("`{}` in an image with nothing of it on the node, {} starts a mode", o.cmd, o.repeat);
+    println!();
+    print!("{}", image::cold_table(&modes));
+    Ok(())
 }
 
 /// Writes `samples` to the raw results file when there is one. A write that fails is said once
@@ -159,7 +391,7 @@ fn keep(raw: &mut Option<Raw>, suite: &str, step: &str, samples: &[node::Sample]
 
 async fn storm(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sdk::Error> {
     let mut steps = Vec::new();
-    for &rate in &o.rates {
+    for &rate in o.rates.as_deref().unwrap_or(&[25, 50, 100, 200, 300, 400]) {
         let step = node::storm_step(t, rate, o.seconds).await?;
         if let Some(e) = &step.first_error {
             eprintln!("rate {rate}: {} failed ({} infra), first: {e}", step.failed, step.infra);
