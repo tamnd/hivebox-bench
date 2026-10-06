@@ -18,7 +18,7 @@ hive-sdk = { git = "https://github.com/tamnd/hivebox", tag = "v0.0.27" }
 # For the keeper's Status call, which replay reads its write rate from.
 hive-proto = { git = "https://github.com/tamnd/hivebox", tag = "v0.0.27" }
 tonic = { version = "0.14", default-features = false, features = ["channel"] }
-zstd = "0.13"
+zstd = "0.14"
 tokio = { version = "1.53", features = ["macros", "process", "rt-multi-thread", "sync", "time"] }
 
 [lints.rust]
