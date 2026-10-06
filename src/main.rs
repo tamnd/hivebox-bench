@@ -8,9 +8,11 @@ use std::time::Duration;
 use hive_sdk::Client;
 use hivebox_bench::cluster::{self, Cluster, LossOpts, Rng, Shape};
 use hivebox_bench::image::{self, Nectar};
+use hivebox_bench::memory::{self, MemOpts};
 use hivebox_bench::node::{self, Target};
 use hivebox_bench::qos::{self, QosOpts};
 use hivebox_bench::raw::Raw;
+use hivebox_bench::snap::{self, SnapOpts};
 use hivebox_bench::suite::{self, SUITES};
 
 fn main() -> ExitCode {
@@ -35,6 +37,8 @@ fn main() -> ExitCode {
                         | "cold-image"
                         | "image-import"
                         | "cpu-qos"
+                        | "snapshot"
+                        | "memory"
                 ) =>
             {
                 let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build();
@@ -133,6 +137,18 @@ fn main() -> ExitCode {
             println!("  --pause-ms 20           cpu-qos: the probe's sleep after each step");
             println!("  --hog-s 30              cpu-qos: how long the hogs spin each time");
             println!("  --rounds 5              cpu-qos: rounds of alone, no QoS and QoS");
+            println!("  --pauses 50             snapshot: pause and resume rounds");
+            println!(
+                "  --sizes 10,100,1000     snapshot: the MiB a cell writes before its snapshot"
+            );
+            println!("  --snapshots 3           snapshot: snapshots per size");
+            println!("  --agents 32             memory: agent cells");
+            println!("  --think-s 60            memory: how long an agent waits after each step");
+            println!("  --length-s 600          memory: how long memory is read, after a warm up");
+            println!(
+                "  --scratch-mib 32        memory: the scratch file each agent reads every step"
+            );
+            println!("  --cgroup DIR            memory: the comb's cgroup root, which is read");
             ExitCode::SUCCESS
         }
     }
@@ -163,6 +179,8 @@ struct Opts {
     scratch: Option<std::path::PathBuf>,
     layouts: Option<std::path::PathBuf>,
     qos: QosOpts,
+    snap: SnapOpts,
+    mem: MemOpts,
 }
 
 impl Opts {
@@ -215,6 +233,14 @@ impl Opts {
                 hog_for: Duration::from_secs(30),
                 rounds: 5,
             },
+            snap: SnapOpts { pauses: 50, sizes: vec![10, 100, 1000], repeat: 3 },
+            mem: MemOpts {
+                agents: 32,
+                think: Duration::from_secs(60),
+                length: Duration::from_secs(600),
+                scratch: 32,
+                cgroup: std::path::PathBuf::new(),
+            },
         };
         let list = |v: &str| v.split(',').map(|n| n.trim().parse().expect("a number")).collect();
         let secs = |v: &str| Duration::from_secs_f64(v.parse().expect("a number of seconds"));
@@ -262,6 +288,14 @@ impl Opts {
                 "--pause-ms" => o.qos.pause = Duration::from_millis(v.parse().expect("a number")),
                 "--hog-s" => o.qos.hog_for = secs(v),
                 "--rounds" => o.qos.rounds = v.parse().expect("--rounds takes a number"),
+                "--pauses" => o.snap.pauses = v.parse().expect("--pauses takes a number"),
+                "--sizes" => o.snap.sizes = list(v),
+                "--snapshots" => o.snap.repeat = v.parse().expect("--snapshots takes a number"),
+                "--agents" => o.mem.agents = v.parse().expect("--agents takes a number"),
+                "--think-s" => o.mem.think = secs(v),
+                "--length-s" => o.mem.length = secs(v),
+                "--scratch-mib" => o.mem.scratch = v.parse().expect("--scratch-mib takes a number"),
+                "--cgroup" => o.mem.cgroup = v.into(),
                 other => panic!("unknown option {other}"),
             }
         }
@@ -304,6 +338,8 @@ async fn run(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
         "replay" => replay(&c, o, &mut raw).await,
         "node-loss" => loss(&c, o, &mut raw).await,
         "cpu-qos" => cpu_qos(&t, o, &mut raw).await,
+        "snapshot" => snapshot(&t, o, &mut raw).await,
+        "memory" => mem(&t, o, &mut raw).await,
         _ => exec(&t, o, &mut raw).await,
     };
     // Whatever happened, leave nothing behind.
@@ -334,6 +370,50 @@ async fn cpu_qos(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive
     }
     println!();
     print!("{}", qos::table(&modes));
+    Ok(())
+}
+
+async fn snapshot(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sdk::Error> {
+    let s = &o.snap;
+    println!(
+        "{} pause and resume rounds, {} snapshots at each of {:?} MiB written, fork not measured",
+        s.pauses, s.repeat, s.sizes
+    );
+    let r = snap::run(t, s).await?;
+    keep(raw, "snapshot", "idle", &snap::samples(&r.idle));
+    keep(raw, "snapshot", "pause", &snap::samples(&r.pauses.pause));
+    keep(raw, "snapshot", "resume", &snap::samples(&r.pauses.resume));
+    for z in &r.sizes {
+        keep(raw, "snapshot", &format!("snapshot-{}", z.mib), &snap::samples(&z.snapshot));
+        keep(raw, "snapshot", &format!("stall-{}", z.mib), &snap::samples(&z.stall));
+        keep(raw, "snapshot", &format!("restore-{}", z.mib), &snap::samples(&z.restore));
+    }
+    println!();
+    print!("{}", snap::table(&r));
+    Ok(())
+}
+
+async fn mem(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sdk::Error> {
+    let m = &o.mem;
+    if m.cgroup.as_os_str().is_empty() {
+        return Err(bad("memory needs --cgroup, the comb's cgroup root"));
+    }
+    println!(
+        "{} agents, {} s of think time after each step, {} MiB scratch each, {} s measured after {} s of warm up, cgroup {}",
+        m.agents,
+        m.think.as_secs_f64(),
+        m.scratch,
+        m.length.as_secs_f64(),
+        m.think.as_secs_f64(),
+        m.cgroup.display()
+    );
+    let r = memory::run(t, m).await?;
+    keep(raw, "memory", "step", &r.steps);
+    if r.failed.0 > 0 {
+        eprintln!("{} steps failed, first: {}", r.failed.0, r.failed.1.as_deref().unwrap_or(""));
+    }
+    println!();
+    print!("{}", memory::table(&r));
     Ok(())
 }
 

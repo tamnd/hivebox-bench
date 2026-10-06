@@ -70,7 +70,7 @@ pub const SUITES: &[Suite] = &[
     Suite {
         name: "memory",
         scope: Scope::Node,
-        measures: "peak and time integrated memory with and without pmem-DAX, FPR and DAMON",
+        measures: "peak and mean memory of agent cells, with idle trimming off and on",
         target: "reproduce DSec's 40.2% and 21.2% reductions",
         milestone: "M2",
     },
