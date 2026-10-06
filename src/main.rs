@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use hive_sdk::Client;
 use hivebox_bench::cluster::{self, Cluster, LossOpts, Rng, Shape};
+use hivebox_bench::density::{self, DensityOpts};
 use hivebox_bench::image::{self, Nectar};
 use hivebox_bench::memory::{self, MemOpts};
 use hivebox_bench::node::{self, Target};
@@ -39,6 +40,7 @@ fn main() -> ExitCode {
                         | "cpu-qos"
                         | "snapshot"
                         | "memory"
+                        | "density"
                 ) =>
             {
                 let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build();
@@ -103,7 +105,7 @@ fn main() -> ExitCode {
             );
             println!("  --zipf 1.1              replay: the Zipf exponent over the images");
             println!(
-                "  --seed 1                replay: the seed for arrivals, lifetimes and images"
+                "  --seed 1                replay, density: the seed for arrivals, lifetimes, images and CPU shares"
             );
             println!("  --hold 30               node-loss: cells made and held before the burst");
             println!("  --rate 10               node-loss: the burst's creates a second");
@@ -148,7 +150,22 @@ fn main() -> ExitCode {
             println!(
                 "  --scratch-mib 32        memory: the scratch file each agent reads every step"
             );
-            println!("  --cgroup DIR            memory: the comb's cgroup root, which is read");
+            println!(
+                "  --cgroup DIR            memory, density: the comb's cgroup root, which is read"
+            );
+            println!("  --counts 25,50,...,800  density: the cells alive in each step");
+            println!(
+                "  --load 1                density: what each CPU share is multiplied by, 0 for none"
+            );
+            println!("  --probes 400            density: timed `true` runs per step");
+            println!("  --parallel 4            density: of those, how many at once");
+            println!(
+                "  --warm-s 5              density: how long the loaders run before the probes"
+            );
+            println!("  --cell-mib 256          density: the memory each cell asks for");
+            println!(
+                "  --floor-mib 2048        density: the host memory available a step needs to start"
+            );
             ExitCode::SUCCESS
         }
     }
@@ -181,6 +198,7 @@ struct Opts {
     qos: QosOpts,
     snap: SnapOpts,
     mem: MemOpts,
+    density: DensityOpts,
 }
 
 impl Opts {
@@ -241,6 +259,17 @@ impl Opts {
                 scratch: 32,
                 cgroup: std::path::PathBuf::new(),
             },
+            density: DensityOpts {
+                counts: vec![25, 50, 100, 200, 400, 800],
+                probes: 400,
+                parallel: 4,
+                warm: Duration::from_secs(5),
+                cell_mib: 256,
+                floor_mib: 2048,
+                cgroup: None,
+                seed: 1,
+                load: 1.0,
+            },
         };
         let list = |v: &str| v.split(',').map(|n| n.trim().parse().expect("a number")).collect();
         let secs = |v: &str| Duration::from_secs_f64(v.parse().expect("a number of seconds"));
@@ -295,7 +324,19 @@ impl Opts {
                 "--think-s" => o.mem.think = secs(v),
                 "--length-s" => o.mem.length = secs(v),
                 "--scratch-mib" => o.mem.scratch = v.parse().expect("--scratch-mib takes a number"),
-                "--cgroup" => o.mem.cgroup = v.into(),
+                "--cgroup" => {
+                    o.mem.cgroup = v.into();
+                    o.density.cgroup = Some(v.into());
+                }
+                "--counts" => o.density.counts = list(v),
+                "--load" => o.density.load = v.parse().expect("--load takes a number"),
+                "--probes" => o.density.probes = v.parse().expect("--probes takes a number"),
+                "--parallel" => o.density.parallel = v.parse().expect("--parallel takes a number"),
+                "--warm-s" => o.density.warm = secs(v),
+                "--cell-mib" => o.density.cell_mib = v.parse().expect("--cell-mib takes a number"),
+                "--floor-mib" => {
+                    o.density.floor_mib = v.parse().expect("--floor-mib takes a number")
+                }
                 other => panic!("unknown option {other}"),
             }
         }
@@ -304,6 +345,7 @@ impl Opts {
         }
         o.loss.image = o.image.clone();
         o.loss.seconds = o.seconds;
+        o.density.seed = o.seed;
         o
     }
 }
@@ -340,6 +382,7 @@ async fn run(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
         "cpu-qos" => cpu_qos(&t, o, &mut raw).await,
         "snapshot" => snapshot(&t, o, &mut raw).await,
         "memory" => mem(&t, o, &mut raw).await,
+        "density" => dense(&t, o, &mut raw).await,
         _ => exec(&t, o, &mut raw).await,
     };
     // Whatever happened, leave nothing behind.
@@ -414,6 +457,38 @@ async fn mem(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sdk
     }
     println!();
     print!("{}", memory::table(&r));
+    Ok(())
+}
+
+async fn dense(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sdk::Error> {
+    let d = &o.density;
+    println!(
+        "steps of {:?} cells of {} MiB, {} timed `true` runs per step {} at a time after {} s of load, CPU shares from seed {} times {}",
+        d.counts,
+        d.cell_mib,
+        d.probes,
+        d.parallel,
+        d.warm.as_secs_f64(),
+        d.seed,
+        d.load
+    );
+    let r = density::run(t, d).await?;
+    for s in &r.steps {
+        keep(raw, "density", &s.cells.to_string(), &s.execs);
+    }
+    println!();
+    print!("{}", density::table(&r));
+    println!();
+    if let Some(why) = &r.stopped {
+        println!("stopped early: {why}");
+    }
+    match density::most(&r) {
+        Some(n) => println!(
+            "most cells with an exec p99 of {} ms or less: {n}",
+            density::TARGET.as_millis()
+        ),
+        None => println!("no step had an exec p99 of {} ms or less", density::TARGET.as_millis()),
+    }
     Ok(())
 }
 

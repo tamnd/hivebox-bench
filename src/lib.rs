@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cluster;
+pub mod density;
 pub mod image;
 pub mod memory;
 pub mod node;
