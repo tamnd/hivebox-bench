@@ -28,3 +28,16 @@ Start one process per shard. Each one writes a JSON line per task to `--out` and
 - `error`: set when the image could not be made, in which case nothing ran.
 
 Docker Hub allows 100 anonymous pulls an hour, which is plenty, since a task takes several minutes.
+
+# GRPO over cells
+
+`grpo.py` is a GRPO loop whose rollouts run in hivebox cells through verl's agent loop and the verl adapter in the hivebox Python SDK, with the reward from `Verify.Run`. The policy is a softmax over five scripted ways to treat psf/requests 2317, from the upstream fix to a fix that tampers with a test, so it trains on a CPU. What it measures is the sandbox side of a step: how long a group takes, whether every reward is right, what is masked and what is left behind.
+
+It needs the psf__requests-2317 image on the comb, named `swe-requests` or given with `--image`, and verl 0.9 with torch and the hivebox SDK from 0.0.45 or newer:
+
+```
+HIVE_ENDPOINT=unix:/var/lib/hivebox/comb.sock COMB_PID=$(pidof hive-comb) python grpo.py \
+  --steps 16 --prompts 2 --group 8 --inflight 16 --out grpo.jsonl
+```
+
+Each step writes a line with `kind` `step`, which has the rollout time, the rewards, how many samples were masked or got a reward their arm should not, the policy after the update, the cells still alive and the comb's RSS, and a line with `kind` `sample` for each sample, with its arm, reward, verify time and the time of each tool call. `--capacity-wait 0` masks a sample the node turns away for room at once, as the SDK did before 0.0.45.

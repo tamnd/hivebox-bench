@@ -5,3 +5,4 @@ One directory per run date, with a markdown report and the raw results or a link
 - `2026-10-04`: image-import, cold-image, replay and node-loss on one shared VM.
 - `2026-10-05`: cpu-qos on one shared VM.
 - `2026-10-06`: snapshot, memory and density on one shared VM.
+- `2026-10-13`: GRPO through hivebox's verl adapter, with and without waiting for room, on one shared VM.
