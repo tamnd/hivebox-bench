@@ -8,6 +8,7 @@ use std::time::Duration;
 use hive_sdk::Client;
 use hivebox_bench::cluster::{self, Cluster, LossOpts, Rng, Shape};
 use hivebox_bench::density::{self, DensityOpts};
+use hivebox_bench::docker::{self, Docker, Failure};
 use hivebox_bench::image::{self, Nectar};
 use hivebox_bench::memory::{self, MemOpts};
 use hivebox_bench::node::{self, Target};
@@ -93,6 +94,9 @@ fn main() -> ExitCode {
             println!("  --cells 100             exec: how many cells the commands go round");
             println!("  --in-flight 1,8,32,128  exec: the concurrency levels to step through");
             println!(
+                "  --docker SOCKET         create-storm and exec: run against the Docker daemon on SOCKET instead, as the baseline"
+            );
+            println!(
                 "  --keeper http://127.0.0.1:7480  replay: the keeper whose writes are counted"
             );
             println!("  --idle-s 30             replay: how long the idle write rate is measured");
@@ -162,7 +166,9 @@ fn main() -> ExitCode {
             println!(
                 "  --warm-s 5              density: how long the loaders run before the probes"
             );
-            println!("  --cell-mib 256          density: the memory each cell asks for");
+            println!(
+                "  --cell-mib 256          density, and the other node suites when given: the memory each cell asks for"
+            );
             println!(
                 "  --floor-mib 2048        density: the host memory available a step needs to start"
             );
@@ -179,6 +185,8 @@ struct Opts {
     p99: Duration,
     alive: u32,
     cells: u32,
+    cell_mib: Option<u32>,
+    docker: Option<std::path::PathBuf>,
     in_flight: Vec<usize>,
     raw: Option<std::path::PathBuf>,
     keeper: String,
@@ -210,6 +218,8 @@ impl Opts {
             p99: Duration::from_millis(400),
             alive: 0,
             cells: 100,
+            cell_mib: None,
+            docker: None,
             in_flight: vec![1, 8, 32, 128],
             raw: None,
             keeper: "http://127.0.0.1:7480".into(),
@@ -286,6 +296,7 @@ impl Opts {
                     o.in_flight = list(v).into_iter().map(|n: u32| n as usize).collect()
                 }
                 "--raw" => o.raw = Some(v.into()),
+                "--docker" => o.docker = Some(v.into()),
                 "--keeper" => o.keeper = v.into(),
                 "--idle-s" => o.idle = v.parse().expect("--idle-s takes a number"),
                 "--burst" => o.shape.burst = v.parse().expect("--burst takes a number"),
@@ -333,7 +344,10 @@ impl Opts {
                 "--probes" => o.density.probes = v.parse().expect("--probes takes a number"),
                 "--parallel" => o.density.parallel = v.parse().expect("--parallel takes a number"),
                 "--warm-s" => o.density.warm = secs(v),
-                "--cell-mib" => o.density.cell_mib = v.parse().expect("--cell-mib takes a number"),
+                "--cell-mib" => {
+                    o.density.cell_mib = v.parse().expect("--cell-mib takes a number");
+                    o.cell_mib = Some(o.density.cell_mib);
+                }
                 "--floor-mib" => {
                     o.density.floor_mib = v.parse().expect("--floor-mib takes a number")
                 }
@@ -359,6 +373,9 @@ async fn run(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
         println!("{}", machine());
         return images(suite, o);
     }
+    if let Some(socket) = &o.docker {
+        return baseline(suite, o, socket).await;
+    }
     let endpoint = std::env::var("HIVEBOX_ENDPOINT")
         .unwrap_or_else(|_| "unix:/run/hivebox/comb.sock".to_string());
     let run = format!("{}-{}", suite, std::process::id());
@@ -366,7 +383,7 @@ async fn run(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
     if let Ok(token) = std::env::var("HIVEBOX_TOKEN") {
         client = client.token(&token)?;
     }
-    let t = Target { client, image: o.image.clone(), run };
+    let t = Target { client, image: o.image.clone(), run, mem_mib: o.cell_mib };
     println!("{}", machine());
     println!("endpoint {endpoint}, image {}, run {}", o.image, t.run);
     println!();
@@ -660,6 +677,83 @@ async fn exec(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sd
     }
     println!();
     println!("no-op exec (`true`), warm, {} s a step", o.seconds);
+    println!();
+    print!("{}", node::exec_table(&steps));
+    Ok(())
+}
+
+/// create-storm or exec against Docker, with the same steps and tables as against a comb.
+async fn baseline(suite: &str, o: &Opts, socket: &std::path::Path) -> Result<(), hive_sdk::Error> {
+    if !matches!(suite, "create-storm" | "exec") {
+        return Err(bad(format!("{suite} has no Docker baseline")));
+    }
+    let d = Docker {
+        socket: socket.into(),
+        image: o.image.clone(),
+        run: format!("{}-{}", suite, std::process::id()),
+        mem_mib: o.cell_mib,
+    };
+    let version = d.version().await.map_err(|e| bad(e.msg))?;
+    println!("{}", machine());
+    println!("docker {version} at {}, image {}, run {}", socket.display(), o.image, d.run);
+    println!();
+    let mut raw = match &o.raw {
+        Some(path) => Some(Raw::create(path).map_err(|e| bad(format!("{}: {e}", path.display())))?),
+        None => None,
+    };
+    let r = if suite == "create-storm" {
+        docker_storm(&d, o, &mut raw).await
+    } else {
+        docker_exec(&d, o, &mut raw).await
+    };
+    // Whatever happened, leave nothing behind.
+    let (left, took) = d.stop_all().await.map_err(|e| bad(e.msg))?;
+    if left > 0 {
+        eprintln!("removed {left} containers left from the run in {} ms", node::ms(took));
+    }
+    r.map_err(|e| bad(e.msg))
+}
+
+async fn docker_storm(d: &Docker, o: &Opts, raw: &mut Option<Raw>) -> Result<(), Failure> {
+    let mut steps = Vec::new();
+    for &rate in o.rates.as_deref().unwrap_or(&[25, 50, 100, 200, 300, 400]) {
+        let step = docker::storm_step(d, rate, o.seconds).await?;
+        if let Some(e) = &step.first_error {
+            eprintln!("rate {rate}: {} failed ({} infra), first: {e}", step.failed, step.infra);
+        }
+        keep(raw, "create-storm", &rate.to_string(), &step.samples);
+        let broke = step.broke(o.p99);
+        steps.push(step);
+        eprint!("{}", node::storm_table(&steps[steps.len() - 1..]));
+        if broke {
+            break;
+        }
+    }
+    println!("create storm, docker, {} s a step", o.seconds);
+    println!();
+    print!("{}", node::storm_table(&steps));
+    Ok(())
+}
+
+async fn docker_exec(d: &Docker, o: &Opts, raw: &mut Option<Raw>) -> Result<(), Failure> {
+    let (ids, took, errors) = docker::fill(d, "exec", o.cells).await;
+    if let Some(e) = errors.into_iter().next() {
+        return Err(e);
+    }
+    println!("{} containers made in {} ms", ids.len(), node::ms(took));
+    let _ = docker::exec_step(d, &ids, &["true"], 8, 1).await;
+    let mut steps = Vec::new();
+    for &c in &o.in_flight {
+        let step = docker::exec_step(d, &ids, &["true"], c, o.seconds).await;
+        if let Some(e) = &step.first_error {
+            eprintln!("{c} in flight: {} failed, first: {e}", step.failed);
+        }
+        eprint!("{}", node::exec_table(std::slice::from_ref(&step)));
+        keep(raw, "exec", &c.to_string(), &step.samples);
+        steps.push(step);
+    }
+    println!();
+    println!("no-op exec (`true`), docker, {} s a step", o.seconds);
     println!();
     print!("{}", node::exec_table(&steps));
     Ok(())

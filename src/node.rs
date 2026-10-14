@@ -23,6 +23,8 @@ pub struct Target {
     pub image: String,
     /// The value of the `bench` label on every cell of this run.
     pub run: String,
+    /// The memory each cell asks for, in MiB, or the SDK's default when unset.
+    pub mem_mib: Option<u32>,
 }
 
 impl Target {
@@ -34,6 +36,9 @@ impl Target {
             ("bench".to_string(), self.run.clone()),
             ("step".to_string(), step.to_string()),
         ]);
+        if let Some(mib) = self.mem_mib {
+            spec.resources.mem_mib = mib;
+        }
         spec
     }
 

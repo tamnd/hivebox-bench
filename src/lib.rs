@@ -10,6 +10,7 @@
 
 pub mod cluster;
 pub mod density;
+pub mod docker;
 pub mod image;
 pub mod memory;
 pub mod node;
