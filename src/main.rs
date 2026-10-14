@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use hivebox_bench::image::{self, Nectar};
 use hivebox_bench::memory::{self, MemOpts};
 use hivebox_bench::node::{self, Target};
 use hivebox_bench::qos::{self, QosOpts};
-use hivebox_bench::raw::Raw;
+use hivebox_bench::raw::{self, Raw};
 use hivebox_bench::snap::{self, SnapOpts};
 use hivebox_bench::suite::{self, SUITES};
 
@@ -66,6 +67,18 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("report") if args.len() > 1 => {
+            for path in &args[1..] {
+                match raw::read(Path::new(path)) {
+                    Ok(lines) => println!("{path}\n\n{}", raw::table(&lines)),
+                    Err(e) => {
+                        eprintln!("{path}: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            ExitCode::SUCCESS
+        }
         Some("--version" | "-V") => {
             println!("hivebox-bench {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -77,6 +90,7 @@ fn main() -> ExitCode {
                 "  list         every suite, where it runs, and the target it is judged against"
             );
             println!("  run <suite>  run one suite against the comb or gate in HIVEBOX_ENDPOINT");
+            println!("  report FILE  print the tables again from raw results written with --raw");
             println!();
             println!(
                 "HIVEBOX_TOKEN is sent as the bearer token when it is set, which a gate needs."
@@ -574,7 +588,7 @@ fn images(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
             std::fs::read_to_string(file).map_err(|e| bad(format!("{}: {e}", file.display())))?;
         let layouts: Vec<std::path::PathBuf> =
             list.lines().map(str::trim).filter(|l| !l.is_empty()).map(Into::into).collect();
-        let rows = image::import_all(&n, std::path::Path::new(dir), &layouts);
+        let rows = image::import_all(&n, Path::new(dir), &layouts);
         println!();
         print!("{}", image::import_table(&rows, image::tree_size(&work).0));
         return Ok(());
@@ -683,7 +697,7 @@ async fn exec(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_sd
 }
 
 /// create-storm or exec against Docker, with the same steps and tables as against a comb.
-async fn baseline(suite: &str, o: &Opts, socket: &std::path::Path) -> Result<(), hive_sdk::Error> {
+async fn baseline(suite: &str, o: &Opts, socket: &Path) -> Result<(), hive_sdk::Error> {
     if !matches!(suite, "create-storm" | "exec") {
         return Err(bad(format!("{suite} has no Docker baseline")));
     }
