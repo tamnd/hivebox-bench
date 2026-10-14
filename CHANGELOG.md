@@ -4,6 +4,7 @@ Every change that a person reading a report would care about goes here, newest f
 
 ## Unreleased
 
+- `hivebox-bench report FILE` prints the table of a raw results file again, a row for each suite and step, so a report's tables can be checked against the raw results it ships with.
 - The first M0 node report, `reports/2026-10-14`: on one shared VM a hivebox create has a p50 of 104.6 ms at 1/s against 1131.4 ms for Docker, a no-op exec 5.7 ms against 303.1 ms, 1,000 cells run commands at once with none failing, and 2,500 too once the create deadline is 120 s, and the gold patch resolves 487 of the 500 SWE-bench Verified tasks, 12 of the 13 others needing the internet the cells did not have.
 - `--docker SOCKET` runs create-storm and exec against the Docker daemon on that socket instead, as the baseline, with containers of `--cell-mib` and no network.
 - `--cell-mib` sets the memory of each cell in create-storm and exec too, not only in density.

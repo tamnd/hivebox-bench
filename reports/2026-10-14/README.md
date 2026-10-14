@@ -190,4 +190,4 @@ python swe/verified.py --dataset verified.parquet --images data/images --hive-oc
 
 ## Raw results
 
-`storm.zst`, `docker-storm.zst`, `exec.zst`, `exec-100.zst`, `docker-exec.zst` and `exec-2500.zst` have a JSON line for each create or exec. `swe.zst` has a JSON line for each of the 500 tasks from the main run, and `swe-rerun.zst` the two scikit-learn tasks run again.
+`storm.zst`, `docker-storm.zst`, `exec.zst`, `exec-100.zst`, `docker-exec.zst` and `exec-2500.zst` have a JSON line for each create or exec. `hivebox-bench report storm.zst` prints a file's table again from its lines, and every create-storm and exec table above comes back the same from these files, except that calls a second is worked out to the last answer and not to the end of the step, so it can differ in the first decimal. `swe.zst` has a JSON line for each of the 500 tasks from the main run, and `swe-rerun.zst` the two scikit-learn tasks run again.
