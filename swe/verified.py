@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -26,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import zlib
 
@@ -51,6 +53,12 @@ def image_name(instance_id: str) -> str:
     return "swe-" + re.sub(r"[^a-z0-9-]", "-", instance_id.lower())
 
 
+def image_ref(task: dict) -> str:
+    """The task's eval image on Docker Hub, named the way the upstream harness pushes them, unless
+    the dataset names one itself."""
+    return task.get("image") or f"swebench/sweb.eval.x86_64.{task['instance_id'].replace('__', '_1776_').lower()}:latest"
+
+
 class Registry:
     """Just enough of the registry API to read one image from Docker Hub without docker."""
 
@@ -70,6 +78,16 @@ class Registry:
         if accept:
             headers["Accept"] = accept
         req = urllib.request.Request(f"{REGISTRY}/{self.repo}/{path}", headers=headers)
+        # Docker Hub lets an address without an account read 100 manifests an hour, and a full run
+        # reads more than that, so a refusal for the rate waits for the window to move on.
+        for _ in range(120):
+            try:
+                return urllib.request.urlopen(req, timeout=300)
+            except urllib.error.HTTPError as e:
+                if e.code != 429:
+                    raise
+                print(f"rate limited on {self.repo}, waiting a minute", flush=True)
+                time.sleep(60)
         return urllib.request.urlopen(req, timeout=300)
 
     def manifest(self) -> dict:
@@ -109,6 +127,10 @@ def apply_layer(reg: Registry, layer: dict, dest: str, hive_oci: str) -> int:
         imp.stdin.close()
     except BrokenPipeError:
         pass
+    except BaseException:
+        # The import waits for the end of its input, which now never comes, so it goes too.
+        imp.kill()
+        raise
     finally:
         err = imp.stderr.read().decode(errors="replace")
         code = imp.wait()
@@ -125,19 +147,29 @@ def prepare(task: dict, images: str, hive_oci: str) -> tuple[str, dict, dict]:
     name = image_name(task["instance_id"])
     dest = os.path.join(images, name)
     t = time.monotonic()
-    reg = Registry(task["image"])
+    reg = Registry(image_ref(task))
     m = reg.manifest()
     with reg.blob(m["config"]["digest"]) as r:
         config = json.load(r)
     env = dict(e.split("=", 1) for e in config.get("config", {}).get("Env") or [])
     info = {"layers": len(m["layers"]), "bytes": 0}
     if not os.path.isdir(dest):
-        try:
-            for layer in m["layers"]:
-                info["bytes"] += apply_layer(reg, layer, dest, hive_oci)
-        except BaseException:
-            shutil.rmtree(dest, ignore_errors=True)
-            raise
+        # A layer of a few gigabytes now and then loses its connection halfway, so the image is
+        # fetched again from the start, up to three times.
+        for tries in range(3):
+            try:
+                for layer in m["layers"]:
+                    info["bytes"] += apply_layer(reg, layer, dest, hive_oci)
+                break
+            except (OSError, http.client.HTTPException) as e:
+                shutil.rmtree(dest, ignore_errors=True)
+                info["bytes"] = 0
+                if tries == 2:
+                    raise
+                print(f"fetching {name} failed ({e}), trying again", flush=True)
+            except BaseException:
+                shutil.rmtree(dest, ignore_errors=True)
+                raise
     info["fetch"] = time.monotonic() - t
     return name, env, info
 
@@ -146,9 +178,22 @@ async def attempt(hive, task: dict, name: str, env: dict, patch: str, run: str, 
     """Runs the eval script once with `patch` applied, and grades the log."""
     spec = hivebox.Spec(image=name, backend="container", env=env, labels={"bench": run, "task": task["instance_id"][:63]})
     out: dict = {}
-    t = time.monotonic()
-    cell = await hive.cells.create(spec)
+    # A node short of memory turns new cells away until the pressure passes, which on a shared
+    # machine can take a while, so the attempt waits for room instead of failing the task.
+    waited = time.monotonic()
+    while True:
+        t = time.monotonic()
+        try:
+            cell = await hive.cells.create(spec)
+            break
+        except hivebox.CapacityUnavailable:
+            if t - waited > 3600:
+                raise
+            out["waited_for_room"] = 0.0
+            await asyncio.sleep(15)
     out["create"] = time.monotonic() - t
+    if "waited_for_room" in out:
+        out["waited_for_room"] = t - waited
     try:
         log = []
         if patch:
@@ -198,6 +243,7 @@ async def main() -> int:
     p.add_argument("--out", required=True)
     p.add_argument("--logs", required=True, help="where each attempt's log is kept")
     p.add_argument("--only", default="", help="comma separated instance ids")
+    p.add_argument("--skip", action="append", default=[], help="another --out file whose tasks are done, so a run can be split again")
     p.add_argument("--shard", default="0/1", help="i/n: the ith of n contiguous blocks of tasks")
     p.add_argument("--timeout", type=float, default=1800)
     p.add_argument("--keep-images", action="store_true")
@@ -214,9 +260,10 @@ async def main() -> int:
     tasks = tasks[i * size : (i + 1) * size]
     os.makedirs(a.logs, exist_ok=True)
     done = set()
-    if os.path.exists(a.out):
-        with open(a.out) as f:
-            done = {json.loads(line)["instance_id"] for line in f if line.strip()}
+    for path in [a.out, *a.skip]:
+        if os.path.exists(path):
+            with open(path) as f:
+                done |= {json.loads(line)["instance_id"] for line in f if line.strip()}
     run = f"swe-{os.getpid()}"
     async with hivebox.AsyncHive(project="bench") as hive:
         for k, task in enumerate(tasks):
@@ -231,7 +278,7 @@ async def main() -> int:
             started = time.monotonic()
             try:
                 name, env, row["image"] = prepare(task, a.images, a.hive_oci)
-            except (OSError, RuntimeError, ValueError, KeyError) as e:
+            except (OSError, RuntimeError, ValueError, KeyError, http.client.HTTPException) as e:
                 row["error"] = f"image: {e}"[:1000]
                 row["gold"] = row["empty"] = None
             else:

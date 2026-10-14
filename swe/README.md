@@ -18,16 +18,20 @@ HIVE_ENDPOINT=unix:/var/lib/hivebox/comb.sock ./venv/bin/python verified.py \
   --hive-oci /usr/local/bin/hive-oci --out run/shard0.jsonl --logs run/logs --shard 0/2
 ```
 
-Start one process per shard. Each one writes a JSON line per task to `--out` and skips the tasks already in it, so a run that stops is started again with the same command. To try a task again, delete its line.
+Start one process per shard. Each one writes a JSON line per task to `--out` and skips the tasks already in it, so a run that stops is started again with the same command. To try a task again, delete its line. To split a run that is under way into more shards, stop it and start the new shards with each old `--out` file given as `--skip`.
 
 ## What each line says
 
-- `gold` and `empty`: `create`, `apply` and `eval` in seconds, and `resolved` as the upstream grader decides it.
+- `gold` and `empty`: `create`, `apply` and `eval` in seconds, and `resolved` as the upstream grader decides it. A node short of memory turns new cells away, and an attempt waits for room for up to an hour, in which case `waited_for_room` has the seconds it waited.
 - `image`: how many layers the task image has, their compressed size in bytes, and `fetch`, the seconds it took to get them from the registry and unpack them.
 - `wall`: the seconds the whole task took.
 - `error`: set when the image could not be made, in which case nothing ran.
 
-Docker Hub allows 100 anonymous pulls an hour, which is plenty, since a task takes several minutes.
+## Images
+
+A task's image is the one the upstream harness builds and publishes, `swebench/sweb.eval.x86_64.<instance id>:latest` on Docker Hub, with `__` in the id written as `_1776_` and the whole name in lower case. A task row that has an `image` field uses that instead.
+
+Docker Hub lets an address without an account read 100 manifests an hour, and three shards started together read more than that in the first hour. A refused request waits a minute and asks again, for up to two hours. A layer of a few gigabytes sometimes loses its connection halfway, so a fetch that fails on the network is thrown away and done again from the start, up to three times, before the task is written down with an `error`.
 
 # GRPO over cells
 
