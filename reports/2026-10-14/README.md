@@ -108,7 +108,9 @@ The 2,500 cells took 537.6 s to make, and the first try with the default 30 s cr
 | 1633 | 163 | 20103 | 157 | 188 | 82 | 67 |
 | 1775 | 140 | 19992 | 182 | 211 | 106 | 90 |
 
-Every stage but `start` stays under 300 ms. `start` is the wait for one of the container driver's 8 workers plus the OCI create itself, so it grows with the queue, and the queue grows because each create takes longer the more cells are up. With 2,075 cells up the host had 4,683 mounts, 2,504 of them network namespace binds under `netns_dir` and 2,152 overlay root filesystems. Every OCI create makes a new mount namespace, which copies the whole host mount table under a lock the kernel holds for all of them, so the 8 workers queue on it. `unshare -m true` took 0.21 to 0.29 s at that point, and 0.00 to 0.01 s with no cells up and 724 mounts. That is a hivebox bug to fix in the container driver, and it is why 2,500 cells needed the longer deadline here.
+Every stage but `start` stays under 300 ms. `start` is the wait for one of the container driver's 8 workers plus the OCI create itself, so it grows with the queue, and the queue grows because each create takes longer the more cells are up. With 2,075 cells up the host had 4,683 mounts, 2,504 of them network namespace binds under `netns_dir` and 2,152 overlay root filesystems. Every OCI create makes a new mount namespace, which copies the whole host mount table under a lock the kernel holds for all of them, so the 8 workers queue on it. `unshare -m true` took 0.21 to 0.29 s at that point, and 0.00 to 0.01 s with no cells up and 724 mounts. That was a hivebox bug in the container driver (tamnd/hivebox#183), and it is why 2,500 cells needed the longer deadline here.
+
+hivebox 0.0.48 fixes it (tamnd/hivebox#184). Each container worker now works in a private mount namespace of its own, and the comb hands it the cell's overlay as a mount that is attached nowhere on the host, so a create copies about 30 mounts however many cells are up. The same exec run on that build, with the default 30 s create deadline and the load at 87.6 at the start, made the 2,500 cells in 170.2 s with no failures, against 537.6 s above. Cells came up at about 17 a second at first, 12.8 a second past 1,000 and 13 a second past 2,000, and the host mount table grew from 484 to 2,834, one network namespace bind a cell. Exec itself did not change, at 62, 218, 324 and 480 a second for 1, 8, 32 and 128 in flight, within the noise of this machine, and stopping the cells took 20.7 s. The raw results are in `exec-2500-fix.zst`.
 
 ### SWE-bench Verified
 
@@ -163,7 +165,7 @@ The images are 1.157 GB at the p50 and 3.168 GB at the most, 659.3 GB in all, fe
 |---|---|---|
 | container create p50 of 300 ms or less | 104.6 ms at 1/s, 113.8 ms at 5/s, 685.0 ms at 10/s, and 221 ms over the 1,000 SWE-bench creates | yes up to 5 creates a second, no at 10 |
 | microVM restore p50 of 250 ms or less | no KVM on this machine | not measured |
-| 1,000 cells at once | 1,000 cells up and running commands, none failed, and 2,500 with a create deadline of 120 s | yes |
+| 1,000 cells at once | 1,000 cells up and running commands, none failed, and 2,500 with the default create deadline since hivebox 0.0.48 | yes |
 | SWE-bench Verified gold passes on 99% or more | 487 of 500, 97.4% | no |
 
 The SWE-bench target is not met as run. The 12 failures that need the internet would need a node with the network guard on and an egress allow list for PyPI, httpbin.org and the sites the sphinx and matplotlib tests fetch. Without those 12, 487 of 488 pass, 99.8%. And none of it is on bare metal, so this report does not say M0's exit criterion passes.
@@ -181,7 +183,7 @@ hivebox-bench run create-storm --docker /var/run/docker.sock --image hb-bench-py
 hivebox-bench run exec --docker /var/run/docker.sock --image hb-bench-python:0 --cells 100 --cell-mib 64 --raw docker-exec.zst
 ```
 
-The 2,500 cell run needs the comb with `mem_mib = 110000` and `create_deadline = "120s"` as above. `hb-bench-python:0` is the comb's unpacked python image, `tar -C data/images/python -c . | docker import - hb-bench-python:0`. SWE-bench Verified, one of 6 shards and then one task again, with `HIVE_SOCKET` set to the comb's socket and the venv from `swe/requirements.txt`:
+The 2,500 cell run needs the comb with `mem_mib = 110000`, and before hivebox 0.0.48 also `create_deadline = "120s"`, as above. `hb-bench-python:0` is the comb's unpacked python image, `tar -C data/images/python -c . | docker import - hb-bench-python:0`. SWE-bench Verified, one of 6 shards and then one task again, with `HIVE_SOCKET` set to the comb's socket and the venv from `swe/requirements.txt`:
 
 ```
 python swe/verified.py --dataset verified.parquet --images data/images --hive-oci hive-oci --out swe-0.jsonl --logs logs --shard 0/6
@@ -190,4 +192,4 @@ python swe/verified.py --dataset verified.parquet --images data/images --hive-oc
 
 ## Raw results
 
-`storm.zst`, `docker-storm.zst`, `exec.zst`, `exec-100.zst`, `docker-exec.zst` and `exec-2500.zst` have a JSON line for each create or exec. `hivebox-bench report storm.zst` prints a file's table again from its lines, and every create-storm and exec table above comes back the same from these files, except that calls a second is worked out to the last answer and not to the end of the step, so it can differ in the first decimal. `swe.zst` has a JSON line for each of the 500 tasks from the main run, and `swe-rerun.zst` the two scikit-learn tasks run again.
+`storm.zst`, `docker-storm.zst`, `exec.zst`, `exec-100.zst`, `docker-exec.zst`, `exec-2500.zst` and `exec-2500-fix.zst` have a JSON line for each create or exec. `hivebox-bench report storm.zst` prints a file's table again from its lines, and every create-storm and exec table above comes back the same from these files, except that calls a second is worked out to the last answer and not to the end of the step, so it can differ in the first decimal. `swe.zst` has a JSON line for each of the 500 tasks from the main run, and `swe-rerun.zst` the two scikit-learn tasks run again.
