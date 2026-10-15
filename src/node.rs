@@ -21,6 +21,8 @@ pub struct Target {
     pub client: Client,
     /// The image every cell starts from.
     pub image: String,
+    /// The backend every cell runs on.
+    pub backend: Backend,
     /// The value of the `bench` label on every cell of this run.
     pub run: String,
     /// The memory each cell asks for, in MiB, or the SDK's default when unset.
@@ -28,10 +30,10 @@ pub struct Target {
 }
 
 impl Target {
-    /// A container spec from the run's image, labelled with the run and `step`.
+    /// A spec for the run's image and backend, labelled with the run and `step`.
     #[must_use]
     pub fn spec(&self, step: &str) -> CellSpec {
-        let mut spec = CellSpec::new(Source::Image(self.image.clone()), Backend::Container);
+        let mut spec = CellSpec::new(Source::Image(self.image.clone()), self.backend);
         spec.labels = BTreeMap::from([
             ("bench".to_string(), self.run.clone()),
             ("step".to_string(), step.to_string()),

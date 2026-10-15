@@ -112,6 +112,56 @@ Every stage but `start` stays under 300 ms. `start` is the wait for one of the c
 
 hivebox 0.0.48 fixes it (tamnd/hivebox#184). Each container worker now works in a private mount namespace of its own, and the comb hands it the cell's overlay as a mount that is attached nowhere on the host, so a create copies about 30 mounts however many cells are up. The same exec run on that build, with the default 30 s create deadline and the load at 87.6 at the start, made the 2,500 cells in 170.2 s with no failures, against 537.6 s above. Cells came up at about 17 a second at first, 12.8 a second past 1,000 and 13 a second past 2,000, and the host mount table grew from 484 to 2,834, one network namespace bind a cell. Exec itself did not change, at 62, 218, 324 and 480 a second for 1, 8, 32 and 128 in flight, within the noise of this machine, and stopping the cells took 20.7 s. The raw results are in `exec-2500-fix.zst`.
 
+### create-storm by backend
+
+`--backend` picks the backend for every cell in a run. This machine has no KVM and no QEMU, so the microVM and full VM backends are not measured here, only containers and wasm.
+
+Containers again on hivebox 0.0.48, the same storm as above at a load of 101.7 at the start:
+
+| rate/s | started | failed | achieved/s | p50 ms | p90 ms | p99 ms | max ms | iqr ms | stop ms |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 30 | 0 | 1.0 | 146.4 | 188.0 | 372.3 | 372.3 | 62.4 | 248.3 |
+| 2 | 60 | 0 | 2.0 | 90.2 | 126.1 | 516.5 | 516.5 | 65.1 | 723.5 |
+| 5 | 150 | 0 | 5.0 | 117.6 | 298.5 | 493.8 | 666.8 | 77.3 | 1500.7 |
+| 10 | 300 | 0 | 10.0 | 101.0 | 291.2 | 1018.3 | 1105.2 | 39.6 | 3228.5 |
+| 25 | 750 | 0 | 16.0 | 6999.6 | 17486.3 | 18709.4 | 19253.6 | 9405.8 | 7250.5 |
+| 50 | 1500 | 600 | 15.8 | 24580.5 | 35353.1 | 36654.1 | 36934.3 | 21133.5 | 17480.0 |
+
+With the fix for tamnd/hivebox#183 the node keeps up at 10/s, with a p50 of 101.0 ms where it was 685.0 ms, and makes about 16 cells a second at 25/s and 50/s with none failed at 25/s, against 7.8 a second and 171 failed before. The 600 that failed at 50/s were turned away with CAPACITY_UNAVAILABLE for being too busy, as before.
+
+Wasm cells run a WASI program in the comb itself, here a 50 byte module that returns at once, with the fncall backend turned on in the comb's config and 64 MiB cells, 10 s a step. On hivebox 0.0.48, at a load of 13.4 at the start:
+
+| rate/s | started | failed | achieved/s | p50 ms | p90 ms | p99 ms | max ms | iqr ms | stop ms |
+|---|---|---|---|---|---|---|---|---|---|
+| 25 | 250 | 0 | 25.0 | 14.8 | 51.6 | 116.2 | 191.9 | 17.5 | 119.5 |
+| 50 | 500 | 0 | 49.1 | 34.0 | 106.3 | 353.3 | 451.6 | 47.9 | 428.0 |
+| 100 | 1000 | 0 | 100.0 | 34.5 | 94.2 | 153.4 | 192.3 | 43.4 | 1248.6 |
+| 200 | 2000 | 0 | 197.9 | 82.8 | 260.0 | 347.2 | 423.6 | 145.2 | 2413.5 |
+| 400 | 4000 | 1422 | 257.7 | 365.3 | 1073.0 | 1487.5 | 1914.0 | 597.5 | 2672.3 |
+
+Most of that was two WAL syncs a create, which cost about 10.7 ms each on this disk for a 4 KiB write. A wasm cell is gone after a restart of the comb whatever its record says, so hivebox 0.0.49 stops waiting for those syncs (tamnd/hivebox#186). The same storm on that comb, at a load of 38.6 at the start:
+
+| rate/s | started | failed | achieved/s | p50 ms | p90 ms | p99 ms | max ms | iqr ms | stop ms |
+|---|---|---|---|---|---|---|---|---|---|
+| 25 | 250 | 0 | 25.1 | 2.4 | 13.4 | 44.2 | 51.6 | 1.2 | 430.0 |
+| 50 | 500 | 0 | 50.0 | 2.9 | 29.0 | 186.8 | 276.2 | 3.3 | 442.9 |
+| 100 | 1000 | 0 | 99.6 | 5.1 | 42.7 | 208.0 | 262.4 | 9.0 | 1438.2 |
+| 200 | 2000 | 0 | 197.2 | 30.1 | 323.1 | 557.6 | 656.5 | 123.2 | 2830.3 |
+| 400 | 4000 | 1422 | 257.7 | 71.9 | 411.7 | 632.1 | 810.3 | 285.2 | 1608.1 |
+
+Both storms ran twice, alternating, and the second pair, at a load of 31.7 and 34.8 at the start, gave a p50 at 25/s of 19.3 ms before and 2.5 ms after, and at 50/s of 48.1 ms and 3.8 ms. At 100/s and up the second pair was closer, at 39.5 and 34.1 ms at 100/s. The 1,422 that failed at 400/s in every run were the node's memory ceiling and not its speed, 165,000 MiB with `mem_mib = 110000`, or 2,578 cells of 64 MiB. The p99 at 25/s is still 44 ms, against the 10 ms the spec asks of a wasm create, and from the comb's create metrics what is left is mostly the handshake with the drone while a burst keeps the comb's runtime busy.
+
+Exec on 100 wasm cells on hivebox 0.0.49, at a load of 41.7:
+
+| in flight | cells | ran | failed | per second | p50 ms | p90 ms | p99 ms | max ms | iqr ms |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 100 | 5914 | 0 | 591 | 0.7 | 2.1 | 34.8 | 67.0 | 0.5 |
+| 8 | 100 | 12052 | 0 | 1204 | 3.1 | 12.0 | 54.5 | 115.4 | 3.6 |
+| 32 | 100 | 18650 | 0 | 1864 | 10.2 | 46.3 | 68.7 | 170.7 | 11.2 |
+| 128 | 100 | 26462 | 0 | 2628 | 46.6 | 81.2 | 110.0 | 189.1 | 43.4 |
+
+A wasm exec is 0.7 ms at the p50 with one in flight, and 2,628 a second at 128, about 4 times the 617 a second container cells did above.
+
 ### SWE-bench Verified
 
 All 500 tasks, each run twice in a fresh container cell, once with the gold patch and once with no patch, through the upstream eval script and graded with `swebench` 5.0.2. The images are the SWE-bench ones from Docker Hub, fetched layer by layer into the comb's store by `verified.py`. The run went in 3 shards at once, and then in 6 for the tasks the first 3 had not done, each shard one task at a time.
@@ -163,7 +213,7 @@ The images are 1.157 GB at the p50 and 3.168 GB at the most, 659.3 GB in all, fe
 
 | target | measured here | met |
 |---|---|---|
-| container create p50 of 300 ms or less | 104.6 ms at 1/s, 113.8 ms at 5/s, 685.0 ms at 10/s, and 221 ms over the 1,000 SWE-bench creates | yes up to 5 creates a second, no at 10 |
+| container create p50 of 300 ms or less | 104.6 ms at 1/s, 113.8 ms at 5/s, 685.0 ms at 10/s, and 221 ms over the 1,000 SWE-bench creates | yes up to 5 creates a second, and since hivebox 0.0.48 up to 10, at 101.0 ms |
 | microVM restore p50 of 250 ms or less | no KVM on this machine | not measured |
 | 1,000 cells at once | 1,000 cells up and running commands, none failed, and 2,500 with the default create deadline since hivebox 0.0.48 | yes |
 | SWE-bench Verified gold passes on 99% or more | 487 of 500, 97.4% | no |
@@ -179,11 +229,14 @@ hivebox-bench run create-storm --image python --cell-mib 64 --rates 1,2,5,10,25,
 hivebox-bench run exec --image python --cells 100 --cell-mib 64 --raw exec-100.zst
 hivebox-bench run exec --image python --cells 1000 --cell-mib 64 --raw exec.zst
 hivebox-bench run exec --image python --cells 2500 --cell-mib 64 --raw exec-2500.zst
+hivebox-bench run create-storm --image python --cell-mib 64 --rates 1,2,5,10,25,50 --seconds 30 --p99-ms 100000 --raw storm-container-0048.zst
+hivebox-bench run create-storm --backend fncall --image noop --cell-mib 64 --rates 25,50,100,200,400 --seconds 10 --p99-ms 100000 --raw storm-wasm-0049.zst
+hivebox-bench run exec --backend fncall --image noop --cell-mib 64 --cells 100 --raw exec-wasm-0049.zst
 hivebox-bench run create-storm --docker /var/run/docker.sock --image hb-bench-python:0 --cell-mib 64 --rates 1,2,5,10,25 --seconds 30 --p99-ms 100000 --raw docker-storm.zst
 hivebox-bench run exec --docker /var/run/docker.sock --image hb-bench-python:0 --cells 100 --cell-mib 64 --raw docker-exec.zst
 ```
 
-The 2,500 cell run needs the comb with `mem_mib = 110000`, and before hivebox 0.0.48 also `create_deadline = "120s"`, as above. `hb-bench-python:0` is the comb's unpacked python image, `tar -C data/images/python -c . | docker import - hb-bench-python:0`. SWE-bench Verified, one of 6 shards and then one task again, with `HIVE_SOCKET` set to the comb's socket and the venv from `swe/requirements.txt`:
+The 2,500 cell run needs the comb with `mem_mib = 110000`, and before hivebox 0.0.48 also `create_deadline = "120s"`, as above. The wasm runs need `[backends.fncall]` with `enabled = true` in the comb's config, and the module in `data/wasm/noop.wasm`, with a copy as `true.wasm` for exec, since the first word of a command picks the program. `hb-bench-python:0` is the comb's unpacked python image, `tar -C data/images/python -c . | docker import - hb-bench-python:0`. SWE-bench Verified, one of 6 shards and then one task again, with `HIVE_SOCKET` set to the comb's socket and the venv from `swe/requirements.txt`:
 
 ```
 python swe/verified.py --dataset verified.parquet --images data/images --hive-oci hive-oci --out swe-0.jsonl --logs logs --shard 0/6
@@ -192,4 +245,4 @@ python swe/verified.py --dataset verified.parquet --images data/images --hive-oc
 
 ## Raw results
 
-`storm.zst`, `docker-storm.zst`, `exec.zst`, `exec-100.zst`, `docker-exec.zst`, `exec-2500.zst` and `exec-2500-fix.zst` have a JSON line for each create or exec. `hivebox-bench report storm.zst` prints a file's table again from its lines, and every create-storm and exec table above comes back the same from these files, except that calls a second is worked out to the last answer and not to the end of the step, so it can differ in the first decimal. `swe.zst` has a JSON line for each of the 500 tasks from the main run, and `swe-rerun.zst` the two scikit-learn tasks run again.
+`storm.zst`, `docker-storm.zst`, `exec.zst`, `exec-100.zst`, `docker-exec.zst`, `exec-2500.zst`, `exec-2500-fix.zst`, `storm-container-0048.zst`, `storm-wasm-0048.zst`, `storm-wasm-0049.zst` and `exec-wasm-0049.zst` have a JSON line for each create or exec. `hivebox-bench report storm.zst` prints a file's table again from its lines, and every create-storm and exec table above comes back the same from these files, except that calls a second is worked out to the last answer and not to the end of the step, so it can differ in the first decimal. `storm-container-0048.zst` also gives 90.1 and 65.2 ms for the p50 and iqr at 2/s, against 90.2 and 65.1 ms as printed during the run. `swe.zst` has a JSON line for each of the 500 tasks from the main run, and `swe-rerun.zst` the two scikit-learn tasks run again.
