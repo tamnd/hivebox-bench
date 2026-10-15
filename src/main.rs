@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use hive_sdk::Client;
+use hive_sdk::{Backend, Client};
 use hivebox_bench::cluster::{self, Cluster, LossOpts, Rng, Shape};
 use hivebox_bench::density::{self, DensityOpts};
 use hivebox_bench::docker::{self, Docker, Failure};
@@ -98,6 +98,9 @@ fn main() -> ExitCode {
             println!();
             println!("options for run, with their defaults:");
             println!("  --image python          the image every cell starts from");
+            println!(
+                "  --backend container     create-storm and exec: the backend every cell runs on"
+            );
             println!("  --seconds 10            how long each step lasts");
             println!("  --raw FILE              also write every call to FILE as zstd JSON lines");
             println!(
@@ -194,6 +197,7 @@ fn main() -> ExitCode {
 #[derive(Debug)]
 struct Opts {
     image: String,
+    backend: Backend,
     seconds: u32,
     rates: Option<Vec<u32>>,
     p99: Duration,
@@ -227,6 +231,7 @@ impl Opts {
     fn parse(args: &[String]) -> Self {
         let mut o = Self {
             image: "python".into(),
+            backend: Backend::Container,
             seconds: 10,
             rates: None,
             p99: Duration::from_millis(400),
@@ -301,6 +306,10 @@ impl Opts {
             let v = pair.get(1).map_or("", String::as_str);
             match pair[0].as_str() {
                 "--image" => o.image = v.into(),
+                "--backend" => {
+                    o.backend = Backend::from_name(v)
+                        .expect("--backend takes fncall, container, microvm or fullvm")
+                }
                 "--seconds" => o.seconds = v.parse().expect("--seconds takes a number"),
                 "--rates" => o.rates = Some(list(v)),
                 "--p99-ms" => o.p99 = Duration::from_millis(v.parse().expect("a number")),
@@ -397,9 +406,9 @@ async fn run(suite: &str, o: &Opts) -> Result<(), hive_sdk::Error> {
     if let Ok(token) = std::env::var("HIVEBOX_TOKEN") {
         client = client.token(&token)?;
     }
-    let t = Target { client, image: o.image.clone(), run, mem_mib: o.cell_mib };
+    let t = Target { client, image: o.image.clone(), backend: o.backend, run, mem_mib: o.cell_mib };
     println!("{}", machine());
-    println!("endpoint {endpoint}, image {}, run {}", o.image, t.run);
+    println!("endpoint {endpoint}, image {}, backend {}, run {}", o.image, o.backend, t.run);
     println!();
     let mut raw = match &o.raw {
         Some(path) => Some(Raw::create(path).map_err(|e| bad(format!("{}: {e}", path.display())))?),
@@ -642,7 +651,7 @@ async fn storm(t: &Target, o: &Opts, raw: &mut Option<Raw>) -> Result<(), hive_s
             break;
         }
     }
-    println!("create storm, container, warm, {} s a step", o.seconds);
+    println!("create storm, {}, warm, {} s a step", o.backend, o.seconds);
     println!();
     print!("{}", node::storm_table(&steps));
     if o.alive > 0 {
