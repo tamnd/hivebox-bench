@@ -297,7 +297,27 @@ dependencies = [
  "blake3",
  "bytes",
  "futures",
- "hive-types",
+ "hive-types 0.0.27",
+ "prost",
+ "prost-types",
+ "protox",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tonic-types",
+]
+
+[[package]]
+name = "hive-proto"
+version = "0.0.57"
+source = "git+https://github.com/tamnd/hivebox?tag=v0.0.57#5c840da8de001dfe5a0c34a39ac29f2d6e289572"
+dependencies = [
+ "blake3",
+ "bytes",
+ "futures",
+ "hive-types 0.0.57",
  "prost",
  "prost-types",
  "protox",
@@ -311,13 +331,13 @@ dependencies = [
 
 [[package]]
 name = "hive-sdk"
-version = "0.0.27"
-source = "git+https://github.com/tamnd/hivebox?tag=v0.0.27#eade466fbc056ab57088fa896bf6d9d7f4a0dad5"
+version = "0.0.57"
+source = "git+https://github.com/tamnd/hivebox?tag=v0.0.57#5c840da8de001dfe5a0c34a39ac29f2d6e289572"
 dependencies = [
  "bytes",
  "futures",
- "hive-proto",
- "hive-types",
+ "hive-proto 0.0.57",
+ "hive-types 0.0.57",
  "hyper-util",
  "tokio",
  "tonic",
@@ -330,10 +350,15 @@ version = "0.0.27"
 source = "git+https://github.com/tamnd/hivebox?tag=v0.0.27#eade466fbc056ab57088fa896bf6d9d7f4a0dad5"
 
 [[package]]
+name = "hive-types"
+version = "0.0.57"
+source = "git+https://github.com/tamnd/hivebox?tag=v0.0.57#5c840da8de001dfe5a0c34a39ac29f2d6e289572"
+
+[[package]]
 name = "hivebox-bench"
 version = "0.0.0"
 dependencies = [
- "hive-proto",
+ "hive-proto 0.0.27",
  "hive-sdk",
  "tokio",
  "tonic",
